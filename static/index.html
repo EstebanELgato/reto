@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>Agente RRHH</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; padding: 0 16px; }
+  h1 { font-size: 1.3rem; }
+  label { display: block; margin-top: 16px; font-weight: 600; }
+  select, input, button { width: 100%; padding: 10px; margin-top: 6px; box-sizing: border-box; font-size: 1rem; }
+  button { margin-top: 20px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; }
+  button:disabled { background: #9ca3af; }
+  #resultado { margin-top: 24px; padding: 14px; background: #f3f4f6; border-radius: 6px; white-space: pre-wrap; min-height: 20px; }
+</style>
+</head>
+<body>
+  <h1>Consultar empleado</h1>
+
+  <label for="rol">Tu rol</label>
+  <select id="rol">
+    <option value="COMPRAS">COMPRAS</option>
+    <option value="RRHH">RRHH</option>
+    <option value="VENTAS">VENTAS</option>
+  </select>
+
+  <label for="nombre">¿Por qué empleado deseas consultar?</label>
+  <input id="nombre" type="text" placeholder="Ej: Juan Pérez" />
+
+  <button id="btnConsultar">Consultar</button>
+
+  <div id="resultado"></div>
+
+<script>
+  // Si sirves este HTML desde el mismo backend (FastAPI static), deja
+  // API_URL como cadena vacía: las peticiones van al mismo dominio.
+  // Si lo sirves aparte, pon la URL pública de tu backend en Render, ej:
+  // const API_URL = "https://tu-servicio.onrender.com";
+  const API_URL = "";
+
+  const btn = document.getElementById("btnConsultar");
+  const resultado = document.getElementById("resultado");
+
+  btn.addEventListener("click", async () => {
+    const rol = document.getElementById("rol").value;
+    const nombre = document.getElementById("nombre").value.trim();
+
+    if (!nombre) {
+      resultado.textContent = "Escribe un nombre de empleado.";
+      return;
+    }
+
+    btn.disabled = true;
+    resultado.textContent = "Consultando...";
+
+    try {
+      const resp = await fetch(`${API_URL}/consultar`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rol: rol, nombre_empleado: nombre }),
+      });
+      const data = await resp.json();
+      resultado.textContent = data.respuesta;
+    } catch (err) {
+      resultado.textContent = "Error de conexión con el backend: " + err;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
