@@ -4,14 +4,13 @@ Envuelve la lógica del notebook (buscar_empleado_seguro + preguntar_agente)
 en una API REST real, con un endpoint que el frontend consume.
 """
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
 from google.genai import errors as genai_errors
+import httpx
 
 # ---------------------------------------------------------------------------
 # Paso 1: datos falsos (en un caso real, esto sería una llamada a otra API/DB)
@@ -32,11 +31,11 @@ EMPLEADOS = [
     {"id": 113, "nombre": "Sebastián Ramírez", "cargo": "Asistente Compras", "departamento": "Compras", "estado": "Activo", "salario": 2800000},
     {"id": 114, "nombre": "Daniela Herrera", "cargo": "Comprador Senior", "departamento": "Compras", "estado": "Inactivo", "salario": 5900000},
     {"id": 115, "nombre": "Mateo Suárez", "cargo": "Gerente Ventas", "departamento": "Ventas", "estado": "Activo", "salario": 12000000},
-    {"id": 116, "nombre": "Sara Ortiz", "cargo": "Ejecutiva Ventas", "departamento": "Ventas", "estado": "Activo", "salario": 4200000},
+    {"id": 116, "nombre": "cristian Ortiz", "cargo": "desarrollador", "departamento": "Ventas", "estado": "Activo", "salario": 4200000},
     {"id": 117, "nombre": "Nicolás Aguilar", "cargo": "Analista RRHH", "departamento": "RRHH", "estado": "Activo", "salario": 4800000},
     {"id": 118, "nombre": "Gabriela Peña", "cargo": "Auxiliar Contable", "departamento": "Finanzas", "estado": "Activo", "salario": 3100000},
-    {"id": 119, "nombre": "Alejandro Cruz", "cargo": "Soporte TI", "departamento": "Tecnología", "estado": "Activo", "salario": 4000000},
-    {"id": 120, "nombre": "Natalia Rojas", "cargo": "Directora Compras", "departamento": "Compras", "estado": "Activo", "salario": 17000000},
+    {"id": 119, "nombre": "esteban gutierrez", "cargo": "analista de datos ", "departamento": "Tecnología", "estado": "Activo", "salario": 4000000},
+    {"id": 120, "nombre": "juliana prieto", "cargo": "Directora Compras", "departamento": "Compras", "estado": "Activo", "salario": 17000000},
 ]
 
 # ---------------------------------------------------------------------------
@@ -79,6 +78,64 @@ def buscar_empleado_seguro(nombre: str, contexto: dict, simular_falla: bool = Fa
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("Falta la variable de entorno GEMINI_API_KEY")
+
+# ---------------------------------------------------------------------------
+# Configuración de Supabase — usadas para verificar el token del usuario
+# y para leer su rol REAL desde la tabla `perfiles`.
+# La SUPABASE_SERVICE_KEY es la "secret key" (no la publishable) — nunca
+# va en el frontend, solo vive aquí, en el backend, como variable de entorno.
+# ---------------------------------------------------------------------------
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_KEY")
+
+def obtener_contexto_desde_token(authorization: str | None) -> dict:
+    """
+    Valida el JWT que manda el frontend contra Supabase Auth y devuelve
+    el contexto real {"usuario": email, "rol": rol}.
+
+    Este es el punto que reemplaza el dropdown/login falso: el rol NUNCA
+    viene del cuerpo de la petición, sale de:
+      1) validar el token contra Supabase (confirma quién es el usuario)
+      2) leer su rol en la tabla `perfiles` (backend, con la service key)
+    Un usuario no puede mentir sobre su rol porque nunca lo envía.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Falta token de autenticación")
+
+    token = authorization.removeprefix("Bearer ")
+
+    # 1) Verificar el token y obtener el usuario
+    resp_usuario = httpx.get(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={"Authorization": f"Bearer {token}", "apikey": SUPABASE_SERVICE_KEY},
+        timeout=10,
+    )
+    if resp_usuario.status_code != 200:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+
+    usuario = resp_usuario.json()
+    user_id = usuario["id"]
+    email = usuario.get("email", "desconocido")
+
+    # 2) Leer el rol real desde la tabla perfiles (con la service key,
+    #    que tiene permisos de lectura completos, ignorando RLS)
+    resp_perfil = httpx.get(
+        f"{SUPABASE_URL}/rest/v1/perfiles",
+        params={"id": f"eq.{user_id}", "select": "rol"},
+        headers={
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        },
+        timeout=10,
+    )
+    filas = resp_perfil.json()
+    if not filas:
+        raise HTTPException(status_code=403, detail="Usuario sin perfil/rol asignado")
+
+    rol = filas[0]["rol"]
+    return {"usuario": email, "rol": rol}
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL = "gemini-2.5-flash"
@@ -163,23 +220,18 @@ app.add_middleware(
 )
 
 class ConsultaRequest(BaseModel):
-    rol: str
     nombre_empleado: str
 
 class ConsultaResponse(BaseModel):
     respuesta: str
 
-# ROLES_VALIDOS: whitelist explícita. Si alguien manda un rol que no está
-# aquí, se rechaza ANTES de tocar el LLM o la base de empleados.
-ROLES_VALIDOS = {"COMPRAS", "RRHH", "VENTAS"}
-
 @app.post("/consultar", response_model=ConsultaResponse)
-def consultar(req: ConsultaRequest):
-    rol = req.rol.strip().upper()
-    if rol not in ROLES_VALIDOS:
-        return ConsultaResponse(respuesta=f"Rol inválido: '{req.rol}'.")
+def consultar(req: ConsultaRequest, authorization: str | None = Header(default=None)):
+    # El contexto (incluido el rol) sale ÚNICAMENTE de validar el token.
+    # El body de la petición ya no puede contener "rol" — no hay forma
+    # de que el usuario lo declare, ni por error ni a propósito.
+    contexto = obtener_contexto_desde_token(authorization)
 
-    contexto = {"usuario": "web", "rol": rol}
     pregunta = f"Dame toda la información disponible del empleado {req.nombre_empleado}"
     respuesta = preguntar_agente(pregunta, contexto)
     return ConsultaResponse(respuesta=respuesta)
@@ -188,9 +240,8 @@ def consultar(req: ConsultaRequest):
 def salud():
     return {"status": "ok"}
 
-# Sirve el frontend estático (static/index.html) en la raíz "/"
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/")
-def index():
-    return FileResponse("static/index.html")
+@app.get("/empleados")
+def listar_empleados():
+    # Solo nombres — nunca cargo, salario ni otros campos sensibles.
+    # No requiere rol porque no expone nada que necesite protección.
+    return [e["nombre"] for e in EMPLEADOS]
