@@ -59,8 +59,56 @@ def buscar_empleado(nombre: str, simular_falla: bool = False) -> dict:
 
     return coincidencias[0]
 
+def _query_empleados(nombre: str = None, departamento: str = None, cargo: str = None, estado: str = None) -> list:
+    """Consulta genérica a la tabla empleados con filtros opcionales (AND entre ellos)."""
+    params = {"select": "*"}
+    if nombre:
+        params["nombre"] = f"ilike.*{nombre.strip()}*"
+    if departamento:
+        params["departamento"] = f"ilike.{departamento.strip()}"
+    if cargo:
+        params["cargo"] = f"ilike.*{cargo.strip()}*"
+    if estado:
+        params["estado"] = f"ilike.{estado.strip()}"
+
+    try:
+        resp = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/empleados",
+            params=params,
+            headers=_HEADERS_SUPABASE,
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+    return resp.json()
+
+def buscar_empleados(nombre: str = None, departamento: str = None, cargo: str = None, estado: str = None, contexto: dict = None) -> dict:
+    """Busca empleados por cualquier combinación de filtros. Devuelve una lista (salario filtrado por rol)."""
+    filas = _query_empleados(nombre, departamento, cargo, estado)
+    if filas is None:
+        return {"error": "Servicio no disponible, comuníquese con soporte"}
+    if len(filas) == 0:
+        return {"error": "No se encontraron empleados con esos criterios"}
+
+    resultado = []
+    for fila in filas:
+        fila = dict(fila)
+        if not contexto or contexto.get("rol") != "RRHH":
+            fila.pop("salario", None)
+        resultado.append(fila)
+    return {"total": len(resultado), "empleados": resultado}
+
+def contar_empleados(departamento: str = None, cargo: str = None, estado: str = None) -> dict:
+    """Cuenta empleados que cumplen los filtros dados, sin exponer datos individuales."""
+    filas = _query_empleados(None, departamento, cargo, estado)
+    if filas is None:
+        return {"error": "Servicio no disponible, comuníquese con soporte"}
+    return {"total": len(filas)}
+
 # ---------------------------------------------------------------------------
-# Paso 3: wrapper seguro — el filtro de rol vive en el backend, nunca en el LLM
+# Paso 3: wrapper seguro para búsqueda de UN empleado por nombre exacto
+# (se mantiene para preguntas puntuales tipo "cuál es el cargo de Juan Pérez")
 # ---------------------------------------------------------------------------
 def buscar_empleado_seguro(nombre: str, contexto: dict, simular_falla: bool = False) -> dict:
     resultado = buscar_empleado(nombre, simular_falla=simular_falla)
@@ -136,13 +184,14 @@ REGLAS DE SEGURIDAD (no negociables, aplican sin excepción):
 4. Si la herramienta devuelve un campo "error", informa el error de forma clara. NUNCA inventes datos de un empleado que no pudiste consultar.
 5. Solo usa datos que vengan del resultado de la herramienta.
 6. RESPONDE SOLO LO QUE SE PREGUNTÓ, nada más. Si preguntan el salario, responde únicamente el salario (ej: "El salario de Margarita Prieto es $15.000.000."), no agregues cargo, departamento ni estado a menos que también los pidan. Si preguntan el cargo, responde solo el cargo. No listes todos los campos del empleado salvo que te pidan explícitamente "toda la información" o "todo sobre".
+7. Tienes 3 herramientas: usa "buscar_empleado" para preguntas sobre UN empleado específico por nombre. Usa "buscar_empleados" (plural) cuando pidan una lista de empleados con algún filtro (departamento, cargo, estado). Usa "contar_empleados" cuando pregunten CUÁNTOS empleados cumplen ciertos criterios (no necesitas listarlos, solo el número).
 
 Responde siempre en español, de forma breve y directa.
 """
 
 buscar_empleado_declaration = types.FunctionDeclaration(
     name="buscar_empleado",
-    description="Busca un empleado por nombre y devuelve su cargo, departamento, estado y salario (si el rol del usuario lo permite).",
+    description="Busca UN empleado específico por nombre y devuelve su cargo, departamento, estado y salario (si el rol del usuario lo permite). Falla si el nombre es ambiguo o no existe.",
     parameters={
         "type": "object",
         "properties": {
@@ -151,7 +200,40 @@ buscar_empleado_declaration = types.FunctionDeclaration(
         "required": ["nombre"],
     },
 )
-tool_config_empleados = types.Tool(function_declarations=[buscar_empleado_declaration])
+
+buscar_empleados_declaration = types.FunctionDeclaration(
+    name="buscar_empleados",
+    description="Busca una LISTA de empleados que cumplan uno o varios filtros (departamento, cargo, estado). Úsala cuando pidan varios empleados a la vez, no uno solo.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "departamento": {"type": "string", "description": "Filtra por departamento exacto, ej: 'Compras', 'RRHH', 'Ventas'"},
+            "cargo": {"type": "string", "description": "Filtra por cargo (coincidencia parcial)"},
+            "estado": {"type": "string", "description": "Filtra por estado exacto: 'Activo' o 'Inactivo'"},
+        },
+        "required": [],
+    },
+)
+
+contar_empleados_declaration = types.FunctionDeclaration(
+    name="contar_empleados",
+    description="Cuenta cuántos empleados cumplen ciertos filtros (departamento, cargo, estado). Úsala para preguntas tipo '¿cuántos empleados...?'.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "departamento": {"type": "string", "description": "Filtra por departamento exacto, ej: 'Compras', 'RRHH', 'Ventas'"},
+            "cargo": {"type": "string", "description": "Filtra por cargo (coincidencia parcial)"},
+            "estado": {"type": "string", "description": "Filtra por estado exacto: 'Activo' o 'Inactivo'"},
+        },
+        "required": [],
+    },
+)
+
+tool_config_empleados = types.Tool(function_declarations=[
+    buscar_empleado_declaration,
+    buscar_empleados_declaration,
+    contar_empleados_declaration,
+])
 
 # ---------------------------------------------------------------------------
 # Paso 5: el loop del agente (idéntico al del notebook)
@@ -181,8 +263,25 @@ def preguntar_agente(pregunta: str, contexto: dict, historial: list[dict] | None
 
     if respuesta.function_calls:
         llamada = respuesta.function_calls[0]
-        nombre_buscado = llamada.args["nombre"]
-        resultado_tool = buscar_empleado_seguro(nombre_buscado, contexto, simular_falla=simular_falla)
+
+        # Despacha a la función Python correcta según qué tool pidió Gemini
+        if llamada.name == "buscar_empleado":
+            resultado_tool = buscar_empleado_seguro(llamada.args["nombre"], contexto, simular_falla=simular_falla)
+        elif llamada.name == "buscar_empleados":
+            resultado_tool = buscar_empleados(
+                departamento=llamada.args.get("departamento"),
+                cargo=llamada.args.get("cargo"),
+                estado=llamada.args.get("estado"),
+                contexto=contexto,
+            )
+        elif llamada.name == "contar_empleados":
+            resultado_tool = contar_empleados(
+                departamento=llamada.args.get("departamento"),
+                cargo=llamada.args.get("cargo"),
+                estado=llamada.args.get("estado"),
+            )
+        else:
+            resultado_tool = {"error": f"Herramienta desconocida: {llamada.name}"}
 
         function_call_content = respuesta.candidates[0].content
         function_response_part = types.Part.from_function_response(
