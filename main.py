@@ -15,37 +15,41 @@ import httpx
 # ---------------------------------------------------------------------------
 # Paso 1: datos falsos (en un caso real, esto sería una llamada a otra API/DB)
 # ---------------------------------------------------------------------------
-EMPLEADOS = [
-    {"id": 101, "nombre": "Juan Pérez", "cargo": "Analista", "departamento": "Compras", "estado": "Activo", "salario": 4500000},
-    {"id": 102, "nombre": "Margarita Prieto", "cargo": "Directora Contratación", "departamento": "Compras", "estado": "Activo", "salario": 15000000},
-    {"id": 103, "nombre": "Carlos Jiménez", "cargo": "Coordinador", "departamento": "Compras", "estado": "Activo", "salario": 6200000},
-    {"id": 104, "nombre": "Laura Gómez", "cargo": "Analista Senior", "departamento": "RRHH", "estado": "Activo", "salario": 5800000},
-    {"id": 105, "nombre": "Andrés Rodríguez", "cargo": "Director RRHH", "departamento": "RRHH", "estado": "Activo", "salario": 16000000},
-    {"id": 106, "nombre": "Paula Martínez", "cargo": "Practicante", "departamento": "RRHH", "estado": "Activo", "salario": 1800000},
-    {"id": 107, "nombre": "Diego Torres", "cargo": "Desarrollador", "departamento": "Tecnología", "estado": "Activo", "salario": 7200000},
-    {"id": 108, "nombre": "Camila Vargas", "cargo": "Líder Tecnología", "departamento": "Tecnología", "estado": "Activo", "salario": 13500000},
-    {"id": 109, "nombre": "Felipe Castro", "cargo": "Analista QA", "departamento": "Tecnología", "estado": "Inactivo", "salario": 5000000},
-    {"id": 110, "nombre": "Valentina Ruiz", "cargo": "Contadora", "departamento": "Finanzas", "estado": "Activo", "salario": 6800000},
-    {"id": 111, "nombre": "Santiago López", "cargo": "Director Financiero", "departamento": "Finanzas", "estado": "Activo", "salario": 18000000},
-    {"id": 112, "nombre": "Isabella Morales", "cargo": "Analista Financiero", "departamento": "Finanzas", "estado": "Activo", "salario": 5200000},
-    {"id": 113, "nombre": "Sebastián Ramírez", "cargo": "Asistente Compras", "departamento": "Compras", "estado": "Activo", "salario": 2800000},
-    {"id": 114, "nombre": "Daniela Herrera", "cargo": "Comprador Senior", "departamento": "Compras", "estado": "Inactivo", "salario": 5900000},
-    {"id": 115, "nombre": "Mateo Suárez", "cargo": "Gerente Ventas", "departamento": "Ventas", "estado": "Activo", "salario": 12000000},
-    {"id": 116, "nombre": "cristian Ortiz", "cargo": "desarrollador", "departamento": "Ventas", "estado": "Activo", "salario": 4200000},
-    {"id": 117, "nombre": "Nicolás Aguilar", "cargo": "Analista RRHH", "departamento": "RRHH", "estado": "Activo", "salario": 4800000},
-    {"id": 118, "nombre": "Gabriela Peña", "cargo": "Auxiliar Contable", "departamento": "Finanzas", "estado": "Activo", "salario": 3100000},
-    {"id": 119, "nombre": "esteban gutierrez", "cargo": "analista de datos ", "departamento": "Tecnología", "estado": "Activo", "salario": 4000000},
-    {"id": 120, "nombre": "juliana prieto", "cargo": "Directora Compras", "departamento": "Compras", "estado": "Activo", "salario": 17000000},
-]
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("Falta la variable de entorno GEMINI_API_KEY")
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_KEY")
+
+_HEADERS_SUPABASE = {
+    "apikey": SUPABASE_SERVICE_KEY,
+    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+}
 
 # ---------------------------------------------------------------------------
-# Paso 2: tool cruda
+# Paso 2: tool cruda — ahora consulta la tabla `empleados` en Supabase
+# en vez de una lista en memoria. Usa la service_role key porque la tabla
+# tiene RLS activo sin policy de lectura pública (nadie más puede leerla).
 # ---------------------------------------------------------------------------
 def buscar_empleado(nombre: str, simular_falla: bool = False) -> dict:
     if simular_falla:
         return {"error": "Servicio no disponible, comuníquese con soporte"}
 
-    coincidencias = [e for e in EMPLEADOS if nombre.lower().strip() in e["nombre"].lower()]
+    try:
+        resp = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/empleados",
+            params={"nombre": f"ilike.*{nombre.strip()}*", "select": "*"},
+            headers=_HEADERS_SUPABASE,
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return {"error": "Servicio no disponible, comuníquese con soporte"}
+
+    coincidencias = resp.json()
 
     if len(coincidencias) == 0:
         return {"error": f"No se encontró ningún empleado con nombre '{nombre}'"}
@@ -71,25 +75,8 @@ def buscar_empleado_seguro(nombre: str, contexto: dict, simular_falla: bool = Fa
     return resultado
 
 # ---------------------------------------------------------------------------
-# Paso 4: configuración de Gemini
-# La API key NUNCA va en el código. Se lee de una variable de entorno que
-# configuras en el panel de Render, no en este archivo.
+# Paso 4: configuración de Gemini y del token de sesión de Supabase
 # ---------------------------------------------------------------------------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise RuntimeError("Falta la variable de entorno GEMINI_API_KEY")
-
-# ---------------------------------------------------------------------------
-# Configuración de Supabase — usadas para verificar el token del usuario
-# y para leer su rol REAL desde la tabla `perfiles`.
-# La SUPABASE_SERVICE_KEY es la "secret key" (no la publishable) — nunca
-# va en el frontend, solo vive aquí, en el backend, como variable de entorno.
-# ---------------------------------------------------------------------------
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-    raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_KEY")
-
 def obtener_contexto_desde_token(authorization: str | None) -> dict:
     """
     Valida el JWT que manda el frontend contra Supabase Auth y devuelve
@@ -243,5 +230,15 @@ def salud():
 @app.get("/empleados")
 def listar_empleados():
     # Solo nombres — nunca cargo, salario ni otros campos sensibles.
-    # No requiere rol porque no expone nada que necesite protección.
-    return [e["nombre"] for e in EMPLEADOS]
+    # Lee directo de Supabase (misma tabla que buscar_empleado).
+    try:
+        resp = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/empleados",
+            params={"select": "nombre", "order": "nombre.asc"},
+            headers=_HEADERS_SUPABASE,
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return []
+    return [fila["nombre"] for fila in resp.json()]
