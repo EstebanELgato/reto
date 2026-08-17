@@ -156,13 +156,21 @@ tool_config_empleados = types.Tool(function_declarations=[buscar_empleado_declar
 # ---------------------------------------------------------------------------
 # Paso 5: el loop del agente (idéntico al del notebook)
 # ---------------------------------------------------------------------------
-def preguntar_agente(pregunta: str, contexto: dict, simular_falla: bool = False) -> str:
+def preguntar_agente(pregunta: str, contexto: dict, historial: list[dict] | None = None, simular_falla: bool = False) -> str:
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
         tools=[tool_config_empleados],
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
-    contents = [types.Content(role="user", parts=[types.Part.from_text(text=pregunta)])]
+
+    # Reconstruye la conversación previa para que el modelo tenga contexto
+    # (ej: si preguntaron "el salario de X" y luego solo escriben "X",
+    # el modelo recuerda que la pregunta pendiente era sobre el salario).
+    contents = []
+    for turno in (historial or []):
+        rol_gemini = "model" if turno.get("rol") == "model" else "user"
+        contents.append(types.Content(role=rol_gemini, parts=[types.Part.from_text(text=turno.get("texto", ""))]))
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=pregunta)]))
 
     try:
         respuesta = client.models.generate_content(model=MODEL, contents=contents, config=config)
@@ -209,18 +217,15 @@ app.add_middleware(
 
 class ConsultaRequest(BaseModel):
     pregunta: str
+    historial: list[dict] = []
 
 class ConsultaResponse(BaseModel):
     respuesta: str
 
 @app.post("/consultar", response_model=ConsultaResponse)
 def consultar(req: ConsultaRequest, authorization: str | None = Header(default=None)):
-    # El contexto (incluido el rol) sale ÚNICAMENTE de validar el token.
     contexto = obtener_contexto_desde_token(authorization)
-
-    # La pregunta viaja tal cual la escribió el usuario — el agente decide
-    # qué tan detallada debe ser la respuesta según el SYSTEM_PROMPT (regla 6).
-    respuesta = preguntar_agente(req.pregunta, contexto)
+    respuesta = preguntar_agente(req.pregunta, contexto, historial=req.historial)
     return ConsultaResponse(respuesta=respuesta)
 
 @app.get("/salud")
