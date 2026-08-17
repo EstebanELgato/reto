@@ -135,6 +135,7 @@ REGLAS DE SEGURIDAD (no negociables, aplican sin excepción):
 3. Si el resultado de la herramienta no incluye el campo salario, es porque el usuario no tiene permiso para verlo. No lo inventes. Responde: "No tengo permiso para compartir esa información con tu perfil actual."
 4. Si la herramienta devuelve un campo "error", informa el error de forma clara. NUNCA inventes datos de un empleado que no pudiste consultar.
 5. Solo usa datos que vengan del resultado de la herramienta.
+6. RESPONDE SOLO LO QUE SE PREGUNTÓ, nada más. Si preguntan el salario, responde únicamente el salario (ej: "El salario de Margarita Prieto es $15.000.000."), no agregues cargo, departamento ni estado a menos que también los pidan. Si preguntan el cargo, responde solo el cargo. No listes todos los campos del empleado salvo que te pidan explícitamente "toda la información" o "todo sobre".
 
 Responde siempre en español, de forma breve y directa.
 """
@@ -207,7 +208,7 @@ app.add_middleware(
 )
 
 class ConsultaRequest(BaseModel):
-    nombre_empleado: str
+    pregunta: str
 
 class ConsultaResponse(BaseModel):
     respuesta: str
@@ -215,12 +216,11 @@ class ConsultaResponse(BaseModel):
 @app.post("/consultar", response_model=ConsultaResponse)
 def consultar(req: ConsultaRequest, authorization: str | None = Header(default=None)):
     # El contexto (incluido el rol) sale ÚNICAMENTE de validar el token.
-    # El body de la petición ya no puede contener "rol" — no hay forma
-    # de que el usuario lo declare, ni por error ni a propósito.
     contexto = obtener_contexto_desde_token(authorization)
 
-    pregunta = f"Dame toda la información disponible del empleado {req.nombre_empleado}"
-    respuesta = preguntar_agente(pregunta, contexto)
+    # La pregunta viaja tal cual la escribió el usuario — el agente decide
+    # qué tan detallada debe ser la respuesta según el SYSTEM_PROMPT (regla 6).
+    respuesta = preguntar_agente(req.pregunta, contexto)
     return ConsultaResponse(respuesta=respuesta)
 
 @app.get("/salud")
